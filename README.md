@@ -5,7 +5,7 @@ Convert natural language into shell commands, powered by your own zsh history an
 ```
 agent "find all python files modified this week"
 agent "what was that ffmpeg command I used to compress a video"
-agent "delete all __pycache__ folders recursively"
+agent "create a new file called delete.html"
 ```
 
 ## How it works
