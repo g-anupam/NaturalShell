@@ -5,7 +5,7 @@ Convert natural language into shell commands, powered by your own zsh history an
 ```
 agent "find all python files modified this week"
 agent "what was that ffmpeg command I used to compress a video"
-agent "delete all __pycache__ folders recursively"
+agent "create a new file called delete.html"
 ```
 
 ## How it works
@@ -48,11 +48,7 @@ The first run will download the embedding model (~80MB, one time only).
 
 ### 4. Set up your API keys
 
-```bash
-cp .env.example .env
-```
-
-Edit `.env` and fill in your keys:
+Create `.env` and fill in your keys:
 
 ```
 ACTIVE_LLM=groq
