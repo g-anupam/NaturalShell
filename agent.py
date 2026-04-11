@@ -254,7 +254,7 @@ def _parse_final(text: str) -> Dict[str, Any]:
 
 # ── Main ReAct loop ───────────────────────────────────────────
 
-def run(query: str, provider: str = None) -> Dict[str, Any]:
+def run(query: str, provider: str = None, verbose: bool = False) -> Dict[str, Any]:
     """
     Runs the full ReAct loop:
       1. LLM emits Thought + Action
@@ -301,6 +301,21 @@ def run(query: str, provider: str = None) -> Dict[str, Any]:
 
         scratchpad += llm_output
 
+        # ── Print reasoning trace if verbose ──────────────────
+        if verbose:
+            print()
+            for line in llm_output.strip().splitlines():
+                if line.startswith("Thought:"):
+                    print(f"  [33m{line}[0m")        # yellow
+                elif line.startswith("Action:"):
+                    print(f"  [36m{line}[0m")        # cyan
+                elif line.startswith("Action Input:"):
+                    print(f"  [36m{line}[0m")        # cyan
+                elif line.startswith("Final Answer:"):
+                    print(f"  [32m{line}[0m")        # green
+                elif line.strip():
+                    print(f"  [2m{line}[0m")         # dim
+
         # ── Did the LLM produce a Final Answer? ────────────────
         if "Final Answer:" in scratchpad:
             final_text = scratchpad.split("Final Answer:")[-1]
@@ -320,6 +335,10 @@ def run(query: str, provider: str = None) -> Dict[str, Any]:
                 observation = f"[tool error] {e}"
 
             steps.append({"tool": tool_name, "input": str(args)})
+
+            if verbose:
+                preview = str(observation)[:300].replace("\n", " ")
+                print(f"  [35mObservation: {preview}{'...' if len(str(observation)) > 300 else ''}[0m")
 
             # Append observation and let the loop continue
             scratchpad += f"\nObservation: {observation}\n"

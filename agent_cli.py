@@ -69,6 +69,9 @@ def main():
         print(f"done. {added} entries. Total: {history_count()}")
         return
 
+    verbose = "--verbose" in args or "-v" in args
+    args = [a for a in args if a not in ("--verbose", "-v")]
+
     provider = None
     if "--llm" in args:
         idx = args.index("--llm")
@@ -83,6 +86,7 @@ def main():
     if not query:
         print("Usage:  agent \"your query\"")
         print("        agent --llm gemini \"your query\"")
+        print("        agent --verbose \"your query\"   (show ReAct reasoning)")
         print("        agent --reindex")
         return
 
@@ -97,7 +101,7 @@ def main():
     print(f"\n[{active}] thinking...\n")
 
     from agent import run
-    result = run(query, provider=provider)
+    result = run(query, provider=provider, verbose=verbose)
 
     if result.get("error"):
         print(f"[error] {result['error']}")
