@@ -111,6 +111,27 @@ def main():
         _print_steps(result["steps"])
         print()
 
+    # ── Informational answer (no command to run) ──────────────
+    if result.get("is_answer"):
+        _divider()
+        print(result["explanation"])
+        _divider()
+        return
+
+    # ── Shell command ─────────────────────────────────────────
+    # If the LLM generated a generic history command but already answered
+    # in the explanation, just show the explanation directly
+    GENERIC_HISTORY_CMDS = ["history | tail", "history | grep", "fc -l", "history -"]
+    is_generic = any(result["command"].startswith(c) for c in GENERIC_HISTORY_CMDS)
+
+    if is_generic:
+        print(f"  {result['explanation']}")
+        print()
+        choice = _ask("[r]un raw command  [s]kip  › ")
+        if choice in ("r", "run"):
+            _execute(result["command"])
+        return
+
     _divider()
     print(result["command"])
     _divider()

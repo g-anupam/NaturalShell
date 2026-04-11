@@ -80,6 +80,8 @@ Observation: <tool result will be filled in here>
 ... repeat Thought/Action/Observation as needed ...
 Thought: I now have everything I need.
 Final Answer:
+
+If the query needs a shell command, use this format:
 COMMAND
 <the exact shell command>
 END
@@ -88,6 +90,11 @@ EXPLANATION
 END
 DANGER
 <yes or no>
+END
+
+If the query is informational (e.g. "what were my last commands", "what did i run"), use this format instead:
+ANSWER
+<plain text answer to the user's question>
 END
 
 Available tools:
@@ -103,6 +110,7 @@ RULES:
 - NEVER guess filenames — only use names confirmed by inspect_directory
 - NEVER use history | grep — the history tools already do the search
 - If asked for "last N commands", your answer must show all N commands
+- For purely informational queries (what did i run, show my history), set COMMAND to "echo \'<the answer>\'" so the output is meaningful when run, and set DANGER to no
 - When history tools return commands, LIST ALL of them in your answer exactly as returned — never summarize or pick just one
 - Only output one Thought/Action pair at a time and wait for the Observation
 """
@@ -205,10 +213,21 @@ def _parse_action(text: str):
 
 
 def _parse_final(text: str) -> Dict[str, Any]:
-    """Extract the structured final answer."""
+    """Extract COMMAND block (shell task) or ANSWER block (informational query)."""
     def block(tag: str) -> str:
         m = re.search(rf"{tag}\n(.*?)\nEND", text, re.DOTALL | re.IGNORECASE)
         return m.group(1).strip() if m else ""
+
+    # Informational answer — no shell command needed
+    answer = block("ANSWER")
+    if answer:
+        return {
+            "command":      "",
+            "explanation":  answer,
+            "is_dangerous": False,
+            "is_answer":    True,
+            "success":      True,
+        }
 
     command     = block("COMMAND")
     explanation = block("EXPLANATION")
@@ -228,6 +247,7 @@ def _parse_final(text: str) -> Dict[str, Any]:
         "command":      command,
         "explanation":  explanation or "Shell command generated.",
         "is_dangerous": is_dangerous,
+        "is_answer":    False,
         "success":      bool(command),
     }
 
