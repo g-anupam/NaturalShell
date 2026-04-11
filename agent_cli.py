@@ -2,11 +2,6 @@
 # ============================================================
 #  agent_cli.py
 #  alias agent="python3 ~/projects/natural/agent_cli.py"
-#
-#  Usage:
-#    agent "find all python files modified this week"
-#    agent --llm gemini "what docker command did i use last"
-#    agent --reindex
 # ============================================================
 
 import sys, os, subprocess
@@ -20,10 +15,16 @@ def _divider():
 
 
 def _print_steps(steps: list):
+    icons = {
+        "inspect_directory":      "📁",
+        "search_recent_history":  "🕐",
+        "search_semantic_history":"🗂 ",
+        "search_hybrid_history":  "🗂 ",
+    }
     for s in steps:
-        icon = "📁" if s["tool"] == "inspect_directory" else "🗂"
+        icon = icons.get(s["tool"], "⚙️ ")
         inp  = str(s["input"])[:80]
-        print(f"  {icon}  {s['tool']}  ←  {inp}")
+        print(f"  {icon} {s['tool']}  ←  {inp}")
 
 
 def _ask(prompt_text: str) -> str:

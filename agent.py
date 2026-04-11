@@ -1,7 +1,8 @@
 # ============================================================
 #  agent.py
+#  Proper ReAct loop — explicit Thought/Action/Observation steps.
+#  Text-based loop, not relying on native tool-call APIs.
 #  Zero LangChain. Direct Groq/Gemini/Ollama API calls.
-#  ReAct tool-calling loop from scratch.
 # ============================================================
 
 from __future__ import annotations
@@ -15,289 +16,207 @@ import os_context
 import history_rag
 
 
-# ── Tool handlers ─────────────────────────────────────────────
+# ── Tools ─────────────────────────────────────────────────────
+# Each tool is a plain function. The LLM calls them by name
+# via text output, not via native API tool-call schemas.
 
-def _run_inspect_directory(args: dict) -> str:
+def tool_inspect_directory(args: dict) -> str:
     return os_context.get_context()
 
 
-def _run_search_zsh_history(args: dict) -> str:
+def tool_search_recent_history(args: dict) -> str:
+    """Returns the N most recent commands by actual timestamp."""
+    n = int(args.get("n", 5))
+    return history_rag.get_recent(n)
+
+
+def tool_search_semantic_history(args: dict) -> str:
+    """Semantic similarity search over full history."""
     query = args.get("query", "")
-    hits  = history_rag.search_history(query)
-    if not hits:
-        return "No relevant past commands found in history."
-
-    lines = [
-        "These are REAL commands from the user's actual zsh history.",
-        "Use the most relevant one directly in your answer — do NOT suggest generic shell commands.\n",
-    ]
-    for i, h in enumerate(hits, 1):
-        lines.append(f"  {i}. command: `{h['command']}`")
-        lines.append(f"     relevance: {h['relevance']}%  |  run on: {h['when']}")
-    return "\n".join(lines)
+    return history_rag.search_semantic(query)
 
 
-TOOL_HANDLERS = {
-    "inspect_directory":  _run_inspect_directory,
-    "search_zsh_history": _run_search_zsh_history,
+def tool_search_hybrid_history(args: dict) -> str:
+    """Semantic search scoped to a time window (days back)."""
+    query = args.get("query", "")
+    days  = args.get("days", None)
+    return history_rag.search_hybrid(query, days=days)
+
+
+TOOLS = {
+    "inspect_directory": {
+        "fn": tool_inspect_directory,
+        "desc": "Inspect the current working directory. Returns real filenames, sizes, git status, venv, disk space, project type. Args: { reason: str }",
+    },
+    "search_recent_history": {
+        "fn": tool_search_recent_history,
+        "desc": "Get the N most recent commands from zsh history, sorted by timestamp. Use for: 'last N commands', 'what did i just run', 'most recent command'. Args: { n: int }",
+    },
+    "search_semantic_history": {
+        "fn": tool_search_semantic_history,
+        "desc": "Semantic similarity search over full zsh history. Use for: 'that ffmpeg command i used', 'how did i install X', 'the docker command for pruning'. Args: { query: str }",
+    },
+    "search_hybrid_history": {
+        "fn": tool_search_hybrid_history,
+        "desc": "Semantic search scoped to a time window. Use for: 'pip command from last week', 'git command i ran yesterday'. Args: { query: str, days: int }",
+    },
 }
 
-TOOLS_SCHEMA = [
-    {
-        "type": "function",
-        "function": {
-            "name": "inspect_directory",
-            "description": (
-                "Inspect the current working directory. "
-                "Returns real filenames, sizes, git status, project type, disk space. "
-                "Call this for ANY query involving files, directories, or git."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "reason": {"type": "string", "description": "Short note on what you are looking for."}
-                },
-                "required": ["reason"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_zsh_history",
-            "description": (
-                "Semantic search over the user's full zsh command history. "
-                "Returns REAL commands the user has previously run. "
-                "Use this when the user references something they ran before. "
-                "Always use the actual returned commands in your answer — never suggest generic alternatives."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Natural language description of the command to find."}
-                },
-                "required": ["query"],
-            },
-        },
-    },
-]
+TOOL_LIST = "\n".join(
+    f"- {name}: {info['desc']}" for name, info in TOOLS.items()
+)
 
-SYSTEM = """You are NaturalShell, an expert at converting natural language into precise shell commands for macOS/Linux.
 
-You have two tools:
-- inspect_directory  ->  see the REAL files, folders, git status in the current directory
-- search_zsh_history ->  returns REAL commands from the user's actual zsh history
+# ── ReAct prompt ──────────────────────────────────────────────
 
-CRITICAL RULES:
-- When search_zsh_history returns results, you MUST use one of those actual commands in your answer.
-  Never fall back to generic alternatives like `history | grep` — the tool already did the search.
-- When inspect_directory returns results, use the actual filenames and paths shown.
-- Always call inspect_directory for file/folder/git/disk tasks.
-- Always call search_zsh_history if the user says "i ran", "last time", "previously", "what was that command".
+SYSTEM = f"""You are NaturalShell, an expert at converting natural language into precise shell commands for macOS/Linux.
 
-Respond in EXACTLY this format after using tools — no extra text:
+You reason step by step using this EXACT loop format:
 
+Thought: <your reasoning about what to do next>
+Action: <tool_name>
+Action Input: <valid JSON dict of args>
+Observation: <tool result will be filled in here>
+... repeat Thought/Action/Observation as needed ...
+Thought: I now have everything I need.
+Final Answer:
 COMMAND
 <the exact shell command>
 END
-
 EXPLANATION
-<1-2 sentences explaining what it does>
+<1-2 sentences>
 END
-
 DANGER
 <yes or no>
 END
+
+Available tools:
+{TOOL_LIST}
+
+RULES:
+- Always start with a Thought
+- Always call inspect_directory for any file/folder/git/disk task
+- For history queries, pick the RIGHT tool:
+    * "last N commands" / "what did i just run"  → search_recent_history
+    * "that command I used to..."                 → search_semantic_history
+    * "pip command from last week"                → search_hybrid_history
+- NEVER guess filenames — only use names confirmed by inspect_directory
+- NEVER use history | grep — the history tools already do the search
+- If asked for "last N commands", your answer must show all N commands
+- When history tools return commands, LIST ALL of them in your answer exactly as returned — never summarize or pick just one
+- Only output one Thought/Action pair at a time and wait for the Observation
 """
 
 
-# ── Groq ──────────────────────────────────────────────────────
+# ── LLM clients ───────────────────────────────────────────────
 
-def _groq_loop(query: str) -> tuple[str, list]:
-    try:
-        from groq import Groq
-    except ImportError:
-        sys.exit("[error] Run: pip install groq")
-
+def _call_groq(messages: list) -> str:
+    from groq import Groq
     client   = Groq(api_key=config.GROQ_API_KEY)
-    messages = [
-        {"role": "system", "content": SYSTEM},
-        {"role": "user",   "content": query},
-    ]
-    steps = []
-
-    for _ in range(6):
-        response = client.chat.completions.create(
-            model=config.GROQ_MODEL,
-            messages=messages,
-            tools=TOOLS_SCHEMA,
-            tool_choice="auto",
-            temperature=0,
-        )
-        msg = response.choices[0].message
-
-        messages.append({
-            "role":    "assistant",
-            "content": msg.content or "",
-            "tool_calls": [
-                {
-                    "id":       tc.id,
-                    "type":     "function",
-                    "function": {
-                        "name":      tc.function.name,
-                        "arguments": tc.function.arguments,
-                    },
-                }
-                for tc in (msg.tool_calls or [])
-            ] or None,
-        })
-
-        if not msg.tool_calls:
-            return msg.content or "", steps
-
-        for tc in msg.tool_calls:
-            name   = tc.function.name
-            args   = json.loads(tc.function.arguments)
-            output = TOOL_HANDLERS.get(name, lambda _: "[unknown tool]")(args)
-            steps.append({"tool": name, "input": str(args), "output_preview": str(output)[:120]})
-            messages.append({
-                "role":         "tool",
-                "tool_call_id": tc.id,
-                "content":      str(output),
-            })
-
-    return "", steps
+    response = client.chat.completions.create(
+        model=config.GROQ_MODEL,
+        messages=messages,
+        temperature=0,
+        max_tokens=1024,
+        stop=["Observation:"],   # stop when it expects a tool result
+    )
+    return response.choices[0].message.content or ""
 
 
-# ── Gemini ────────────────────────────────────────────────────
-
-def _gemini_loop(query: str) -> tuple[str, list]:
-    try:
-        import google.generativeai as genai
-    except ImportError:
-        sys.exit("[error] Run: pip install google-generativeai")
-
+def _call_gemini(messages: list) -> str:
+    import google.generativeai as genai
     genai.configure(api_key=config.GEMINI_API_KEY)
-
-    from google.generativeai.types import FunctionDeclaration, Tool as GeminiTool
-
-    tool_decls = [
-        FunctionDeclaration(
-            name="inspect_directory",
-            description="Inspect the current working directory. Returns real filenames, sizes, git status, project type, disk space.",
-            parameters={
-                "type": "object",
-                "properties": {"reason": {"type": "string"}},
-                "required": ["reason"],
-            },
-        ),
-        FunctionDeclaration(
-            name="search_zsh_history",
-            description="Semantic search over the user's full zsh history. Returns REAL past commands. Use the returned commands directly.",
-            parameters={
-                "type": "object",
-                "properties": {"query": {"type": "string"}},
-                "required": ["query"],
-            },
-        ),
-    ]
-
     model = genai.GenerativeModel(
         model_name=config.GEMINI_MODEL,
-        system_instruction=SYSTEM,
-        tools=[GeminiTool(function_declarations=tool_decls)],
+        system_instruction=messages[0]["content"],
     )
+    # Build history for Gemini
+    history = []
+    for m in messages[1:-1]:
+        role = "user" if m["role"] == "user" else "model"
+        history.append({"role": role, "parts": [m["content"]]})
 
-    chat  = model.start_chat()
-    steps = []
-    msg   = query
-
-    for _ in range(6):
-        response = chat.send_message(msg)
-        part     = response.candidates[0].content.parts[0]
-
-        if hasattr(part, "function_call") and part.function_call.name:
-            fc     = part.function_call
-            name   = fc.name
-            args   = dict(fc.args)
-            output = TOOL_HANDLERS.get(name, lambda _: "[unknown tool]")(args)
-            steps.append({"tool": name, "input": str(args), "output_preview": str(output)[:120]})
-
-            from google.generativeai import protos
-            msg = protos.Content(parts=[protos.Part(
-                function_response=protos.FunctionResponse(
-                    name=name,
-                    response={"output": output},
-                )
-            )])
-        else:
-            text = "".join(
-                p.text for p in response.candidates[0].content.parts
-                if hasattr(p, "text")
-            )
-            return text, steps
-
-    return "", steps
+    chat     = model.start_chat(history=history)
+    response = chat.send_message(
+        messages[-1]["content"],
+        generation_config={"temperature": 0, "max_output_tokens": 1024,
+                           "stop_sequences": ["Observation:"]},
+    )
+    return response.text or ""
 
 
-# ── Ollama ────────────────────────────────────────────────────
-
-def _ollama_loop(query: str) -> tuple[str, list]:
+def _call_ollama(messages: list) -> str:
     import urllib.request
-
-    messages = [
-        {"role": "system", "content": SYSTEM},
-        {"role": "user",   "content": query},
-    ]
-    steps = []
-
-    for _ in range(6):
-        payload = json.dumps({
-            "model":    config.OLLAMA_MODEL,
-            "messages": messages,
-            "tools":    TOOLS_SCHEMA,
-            "stream":   False,
-        }).encode()
-
-        req = urllib.request.Request(
-            f"{config.OLLAMA_BASE_URL}/api/chat",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=60) as r:
-            data = json.loads(r.read())
-
-        msg        = data["message"]
-        tool_calls = msg.get("tool_calls", [])
-        messages.append(msg)
-
-        if not tool_calls:
-            return msg.get("content", ""), steps
-
-        for tc in tool_calls:
-            fn     = tc["function"]
-            name   = fn["name"]
-            args   = fn.get("arguments", {})
-            output = TOOL_HANDLERS.get(name, lambda _: "[unknown tool]")(args)
-            steps.append({"tool": name, "input": str(args), "output_preview": str(output)[:120]})
-            messages.append({"role": "tool", "content": str(output)})
-
-    return "", steps
+    payload = json.dumps({
+        "model":    config.OLLAMA_MODEL,
+        "messages": messages,
+        "stream":   False,
+        "options":  {"temperature": 0, "stop": ["Observation:"]},
+    }).encode()
+    req = urllib.request.Request(
+        f"{config.OLLAMA_BASE_URL}/api/chat",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=60) as r:
+        data = json.loads(r.read())
+    return data["message"]["content"] or ""
 
 
-# ── Parser ────────────────────────────────────────────────────
+def _call_llm(provider: str, messages: list) -> str:
+    p = provider.lower()
+    if p == "groq":
+        return _call_groq(messages)
+    elif p == "gemini":
+        return _call_gemini(messages)
+    elif p == "ollama":
+        return _call_ollama(messages)
+    else:
+        sys.exit(f"[error] Unknown provider: {provider}")
 
-def _parse(raw: str) -> Dict[str, Any]:
+
+# ── ReAct parser ──────────────────────────────────────────────
+
+def _parse_action(text: str):
+    """
+    Extract Action and Action Input from LLM output.
+    Returns (tool_name, args_dict) or (None, None) if not found.
+    """
+    action_m = re.search(r"Action:\s*(\w+)", text)
+    input_m  = re.search(r"Action Input:\s*(\{.*?\})", text, re.DOTALL)
+
+    if not action_m:
+        return None, None
+
+    tool_name = action_m.group(1).strip()
+    args      = {}
+    if input_m:
+        try:
+            args = json.loads(input_m.group(1))
+        except json.JSONDecodeError:
+            # Try to extract key values manually if JSON is malformed
+            raw = input_m.group(1)
+            for k, v in re.findall(r'"(\w+)"\s*:\s*"([^"]*)"', raw):
+                args[k] = v
+            for k, v in re.findall(r'"(\w+)"\s*:\s*(\d+)', raw):
+                args[k] = int(v)
+
+    return tool_name, args
+
+
+def _parse_final(text: str) -> Dict[str, Any]:
+    """Extract the structured final answer."""
     def block(tag: str) -> str:
-        m = re.search(rf"{tag}\n(.*?)\nEND", raw, re.DOTALL | re.IGNORECASE)
+        m = re.search(rf"{tag}\n(.*?)\nEND", text, re.DOTALL | re.IGNORECASE)
         return m.group(1).strip() if m else ""
 
     command     = block("COMMAND")
     explanation = block("EXPLANATION")
     danger_raw  = block("DANGER").lower()
 
+    # Fallback to ```bash block
     if not command:
-        m = re.search(r"```(?:bash|sh|zsh)?\n?(.*?)```", raw, re.DOTALL)
+        m = re.search(r"```(?:bash|sh|zsh)?\n?(.*?)```", text, re.DOTALL)
         if m:
             command = m.group(1).strip()
 
@@ -313,38 +232,89 @@ def _parse(raw: str) -> Dict[str, Any]:
     }
 
 
-# ── Entry point ───────────────────────────────────────────────
+# ── Main ReAct loop ───────────────────────────────────────────
 
 def run(query: str, provider: str = None) -> Dict[str, Any]:
+    """
+    Runs the full ReAct loop:
+      1. LLM emits Thought + Action
+      2. We stop at "Observation:" and run the tool
+      3. Append observation, let LLM continue
+      4. Repeat until LLM emits "Final Answer:"
+    """
     p = (provider or config.ACTIVE_LLM).lower()
 
+    if p == "groq" and not config.GROQ_API_KEY:
+        sys.exit("[error] Set GROQ_API_KEY in .env")
+    if p == "gemini" and not config.GEMINI_API_KEY:
+        sys.exit("[error] Set GEMINI_API_KEY in .env")
+
     try:
+        from groq import Groq
+    except ImportError:
         if p == "groq":
-            if config.GROQ_API_KEY == "your-groq-api-key-here":
-                sys.exit("[error] Set GROQ_API_KEY in config.py")
-            raw, steps = _groq_loop(query)
-        elif p == "gemini":
-            if config.GEMINI_API_KEY == "your-gemini-api-key-here":
-                sys.exit("[error] Set GEMINI_API_KEY in config.py")
-            raw, steps = _gemini_loop(query)
-        elif p == "ollama":
-            raw, steps = _ollama_loop(query)
+            sys.exit("[error] Run: pip install groq")
+
+    messages = [
+        {"role": "system",  "content": SYSTEM},
+        {"role": "user",    "content": f"Query: {query}"},
+    ]
+
+    steps        = []
+    scratchpad   = ""   # accumulates the full Thought/Action/Observation trace
+
+    for iteration in range(8):
+        # Ask LLM to continue the ReAct trace
+        # We append the scratchpad as an assistant turn so the LLM
+        # continues from where it left off
+        call_messages = messages.copy()
+        if scratchpad:
+            call_messages.append({"role": "assistant", "content": scratchpad})
+
+        try:
+            llm_output = _call_llm(p, call_messages)
+        except Exception as e:
+            return {
+                "command": "", "explanation": "", "is_dangerous": False,
+                "success": False, "steps": steps, "error": str(e),
+            }
+
+        scratchpad += llm_output
+
+        # ── Did the LLM produce a Final Answer? ────────────────
+        if "Final Answer:" in scratchpad:
+            final_text = scratchpad.split("Final Answer:")[-1]
+            parsed     = _parse_final(final_text)
+            parsed["steps"] = steps
+            parsed["error"] = None
+            return parsed
+
+        # ── Did the LLM call a tool? ───────────────────────────
+        tool_name, args = _parse_action(llm_output)
+
+        if tool_name and tool_name in TOOLS:
+            tool_fn = TOOLS[tool_name]["fn"]
+            try:
+                observation = tool_fn(args or {})
+            except Exception as e:
+                observation = f"[tool error] {e}"
+
+            steps.append({"tool": tool_name, "input": str(args)})
+
+            # Append observation and let the loop continue
+            scratchpad += f"\nObservation: {observation}\n"
+
+        elif tool_name:
+            # Unknown tool — tell the LLM
+            scratchpad += f"\nObservation: [error] Unknown tool '{tool_name}'. Available: {list(TOOLS.keys())}\n"
+
         else:
-            sys.exit(f"[error] Unknown provider '{p}'. Choose: groq | gemini | ollama")
+            # LLM produced neither a tool call nor a Final Answer
+            # Nudge it to continue
+            scratchpad += "\nThought: Let me provide the final answer now.\n"
 
-    except Exception as e:
-        return {
-            "command": "", "explanation": "", "is_dangerous": False,
-            "success": False, "steps": [], "error": str(e),
-        }
-
-    if not raw:
-        return {
-            "command": "", "explanation": "", "is_dangerous": False,
-            "success": False, "steps": steps, "error": "No final answer produced.",
-        }
-
-    parsed = _parse(raw)
-    parsed["steps"] = steps
-    parsed["error"] = None
-    return parsed
+    return {
+        "command": "", "explanation": "", "is_dangerous": False,
+        "success": False, "steps": steps,
+        "error": "Max iterations reached without a final answer.",
+    }
