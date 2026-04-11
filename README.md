@@ -87,8 +87,8 @@ agent "find all files larger than 100mb and show their sizes"
 agent "what git commands did I run to undo changes recently"
 agent "create a virtualenv and install requirements.txt"
 
-To invoke the React Loop use the flag `--verbose`. 
-`agent --verbose "What is git, and what was the last git command i ran"`
+#To invoke the React Loop use the flag `--verbose`. 
+agent --verbose "What is git, and what was the last git command i ran"
 
 # Switch LLM provider on the fly
 agent --llm gemini "show me disk usage sorted by size"
